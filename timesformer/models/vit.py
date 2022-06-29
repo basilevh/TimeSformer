@@ -343,7 +343,7 @@ class TimeSformer(nn.Module):
 
         self.attention_type = attention_type
         self.model.default_cfg = default_cfgs['vit_base_patch'+str(patch_size)+'_224']
-        self.num_patches = (img_size // patch_size) * (img_size // patch_size)
+        self.num_patches = (img_size[0] // patch_size) * (img_size[1] // patch_size)
         if self.pretrained:
             load_pretrained(self.model, num_classes=self.model.num_classes, in_chans=kwargs.get('in_chans', 3), filter_fn=_conv_filter, img_size=img_size, num_frames=num_frames, num_patches=self.num_patches, attention_type=self.attention_type, pretrained_model=pretrained_model)
     def forward(self, x):
