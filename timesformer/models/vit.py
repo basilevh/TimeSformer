@@ -35,7 +35,7 @@ default_cfgs = {
         mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5),
     ),
     # BVH MOD:
-    'vit_base_patch8_224': _cfg(
+    'catchall': _cfg(
         mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5),
     ),
 }
@@ -348,8 +348,12 @@ class TimeSformer(nn.Module):
         self.attention_type = attention_type
         
         # BVH MOD:
-        self.model.default_cfg = default_cfgs['vit_base_patch'+str(patch_size)+'_224']
         # self.model.default_cfg = default_cfgs['vit_base_patch16_224']
+        cfg_key = 'vit_base_patch'+str(patch_size)+'_224'
+        if cfg_key in default_cfgs:
+            self.model.default_cfg = default_cfgs[cfg_key]
+        else:
+            self.model.default_cfg = default_cfgs['catchall']
         
         self.num_patches = (img_size[0] // patch_size) * (img_size[1] // patch_size)
         if self.pretrained:
