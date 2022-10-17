@@ -376,14 +376,14 @@ def _conv_filter(state_dict, patch_size=16):
 @MODEL_REGISTRY.register()
 class TimeSformer(nn.Module):
     def __init__(self, img_size=224, patch_size=16, num_classes=400, num_frames=8,
-                 attention_type='divided_space_time', causal_attention=False, pretrained=False,
-                 pretrained_model='', **kwargs):
+                 attention_type='divided_space_time', causal_attention=False, drop_path_rate=0.1,
+                 pretrained=False, pretrained_model='', **kwargs):
         super(TimeSformer, self).__init__()
         self.pretrained = pretrained
         self.model = VisionTransformer(img_size=img_size, num_classes=num_classes,
         patch_size=patch_size, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4, qkv_bias=True,
         norm_layer=partial(nn.LayerNorm, eps=1e-6), drop_rate=0., attn_drop_rate=0.,
-            drop_path_rate=0.1, num_frames=num_frames, attention_type=attention_type,
+            drop_path_rate=drop_path_rate, num_frames=num_frames, attention_type=attention_type,
             causal_attention=causal_attention, **kwargs)
 
         self.attention_type = attention_type
