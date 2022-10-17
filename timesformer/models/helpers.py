@@ -101,7 +101,9 @@ def load_pretrained(model, cfg=None, num_classes=1000, in_chans=3, filter_fn=Non
     if cfg is None:
         cfg = getattr(model, 'default_cfg')
     if cfg is None or 'url' not in cfg or not cfg['url']:
-        _logger.warning("Pretrained model URL is invalid, using random initialization.")
+        # BVH MOD:
+        # _logger.warning("Pretrained model URL is invalid, using random initialization.")
+        raise RuntimeError(f'Pretrained model URL is invalid: {cfg}')
         return
 
     if len(pretrained_model) == 0:

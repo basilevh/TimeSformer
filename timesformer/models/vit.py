@@ -24,7 +24,7 @@ def _cfg(url='', **kwargs):
         'url': url,
         'num_classes': 1000, 'input_size': (3, 224, 224), 'pool_size': None,
         'crop_pct': .9, 'interpolation': 'bicubic',
-        'mean': IMAGENET_DEFAULT_MEAN, 'std': IMAGENET_DEFAULT_STD,
+        'mean': IMAGENET_DEFAULT_MEAN, 'std': IMAGENET_DEFAULT_STD,  # misleading?
         'first_conv': 'patch_embed.proj', 'classifier': 'head',
         **kwargs
     }
@@ -33,11 +33,11 @@ def _cfg(url='', **kwargs):
 default_cfgs = {
     'vit_base_patch16_224': _cfg(
         url='https://github.com/rwightman/pytorch-image-models/releases/download/v0.1-vitjx/jx_vit_base_p16_224-80ecf9dd.pth',
-        mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5),
+        mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5),  # misleading?
     ),
     # BVH MOD:
     'catchall': _cfg(
-        mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5),
+        mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5),  # misleading?
     ),
 }
 
@@ -62,12 +62,13 @@ class Mlp(nn.Module):
 
 
 class Attention(nn.Module):
-    def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0., with_qkv=True):
+    def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0., with_qkv=True, causal_attention=False):
         super().__init__()
         self.num_heads = num_heads
         head_dim = dim // num_heads
         self.scale = qk_scale or head_dim ** -0.5
         self.with_qkv = with_qkv
+        self.causal_attention = causal_attention  # BVH MOD
         if self.with_qkv:
             self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
             self.proj = nn.Linear(dim, dim)
@@ -85,6 +86,14 @@ class Attention(nn.Module):
             q, k, v = qkv, qkv, qkv
 
         attn = (q @ k.transpose(-2, -1)) * self.scale
+
+        # BVH MOD: Apply temporal causal attention mask by setting lower triangle values to zero.
+        # attn = (B, H, T, T) where H is multihead, first T is query time, second T is key time.
+        # NOTE: We must do this before softmax to ensure probabilities keep summing to one.
+        if self.causal_attention:
+            causal_mask = torch.ones(attn.shape, dtype=torch.bool, device=attn.device).tril()
+            attn[~causal_mask] = -1e9
+
         attn = attn.softmax(dim=-1)
         attn = self.attn_drop(attn)
 
@@ -98,20 +107,21 @@ class Attention(nn.Module):
 class Block(nn.Module):
 
     def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
-                 drop_path=0.1, act_layer=nn.GELU, norm_layer=nn.LayerNorm, attention_type='divided_space_time'):
+                 drop_path=0.1, act_layer=nn.GELU, norm_layer=nn.LayerNorm, attention_type='divided_space_time', causal_attention=False):
         super().__init__()
         self.attention_type = attention_type
+        self.causal_attention = causal_attention  # BVH MOD
         assert(attention_type in ['divided_space_time', 'space_only', 'joint_space_time'])
 
         self.norm1 = norm_layer(dim)
         self.attn = Attention(
-            dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
+            dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)  # NOTE: causal_attention must definitely remain False here.
 
         # Temporal Attention Parameters
         if self.attention_type == 'divided_space_time':
             self.temporal_norm1 = norm_layer(dim)
             self.temporal_attn = Attention(
-                dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
+                dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop, causal_attention=self.causal_attention)
             self.temporal_fc = nn.Linear(dim, dim)
 
         # drop path
@@ -126,16 +136,22 @@ class Block(nn.Module):
         H = num_spatial_tokens // W
 
         if self.attention_type in ['space_only', 'joint_space_time']:
+            assert not(self.causal_attention)
             x = x + self.drop_path(self.attn(self.norm1(x)))
             x = x + self.drop_path(self.mlp(self.norm2(x)))
             return x
+        
         elif self.attention_type == 'divided_space_time':
             # Temporal
+            # BVH MOD: Apply causal_attention (see Attention module).
+            # x = (1, 1945, 768) = (B, T*H*W+1, D).
             xt = x[:, 1:, :]
             xt = rearrange(xt, 'b (h w t) m -> (b h w) t m', b=B, h=H, w=W, t=T)
+            # xt = (108, 18, 768) = (B*H*W, T, D).
             res_temporal = self.drop_path(self.temporal_attn(self.temporal_norm1(xt)))
             res_temporal = rearrange(res_temporal, '(b h w) t m -> b (h w t) m', b=B, h=H, w=W, t=T)
             res_temporal = self.temporal_fc(res_temporal)
+            # res_temporal = (1, 1944, 768) = (B, T*H*W, D).
             xt = x[:, 1:, :] + res_temporal
 
             # Spatial
@@ -192,9 +208,10 @@ class VisionTransformer(nn.Module):
 
     def __init__(self, img_size=224, patch_size=16, in_chans=3, num_classes=1000, embed_dim=768, depth=12,
                  num_heads=12, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop_rate=0., attn_drop_rate=0.,
-                 drop_path_rate=0.1, hybrid_backbone=None, norm_layer=nn.LayerNorm, num_frames=8, attention_type='divided_space_time', dropout=0.):
+                 drop_path_rate=0.1, hybrid_backbone=None, norm_layer=nn.LayerNorm, num_frames=8, attention_type='divided_space_time', causal_attention=False, dropout=0.):
         super().__init__()
         self.attention_type = attention_type
+        self.causal_attention = causal_attention  # BVH MOD
         self.depth = depth
         self.dropout = nn.Dropout(dropout)
         self.num_classes = num_classes
@@ -217,7 +234,7 @@ class VisionTransformer(nn.Module):
         self.blocks = nn.ModuleList([
             Block(
                 dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, qk_scale=qk_scale,
-                drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer, attention_type=self.attention_type)
+                drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer, attention_type=self.attention_type, causal_attention=self.causal_attention)
             for i in range(self.depth)])
         self.norm = norm_layer(embed_dim)
 
@@ -260,6 +277,8 @@ class VisionTransformer(nn.Module):
         self.head = nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
 
     def forward_features(self, x):
+        # BVH NOTE: This is irrelevant and replaced by vision_tf.py DenseTimeSformer forward().
+        
         B = x.shape[0]
         x, T, W = self.patch_embed(x)
         cls_tokens = self.cls_token.expand(x.size(0), -1, -1)
@@ -312,6 +331,8 @@ class VisionTransformer(nn.Module):
         return x[:, 0]
 
     def forward(self, x):
+        # BVH NOTE: This is irrelevant and replaced by vision_tf.py DenseTimeSformer forward().
+
         x = self.forward_features(x)
         x = self.head(x)
         return x
@@ -329,36 +350,41 @@ def _conv_filter(state_dict, patch_size=16):
     return out_dict
 
 
-@MODEL_REGISTRY.register()
-class vit_base_patch16_224(nn.Module):
-    def __init__(self, cfg, **kwargs):
-        super(vit_base_patch16_224, self).__init__()
-        self.pretrained = True
-        patch_size = 16
-        self.model = VisionTransformer(img_size=cfg.DATA.TRAIN_CROP_SIZE, num_classes=cfg.MODEL.NUM_CLASSES, patch_size=patch_size, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4, qkv_bias=True, norm_layer=partial(
-            nn.LayerNorm, eps=1e-6), drop_rate=0., attn_drop_rate=0., drop_path_rate=0.1, num_frames=cfg.DATA.NUM_FRAMES, attention_type=cfg.TIMESFORMER.ATTENTION_TYPE, **kwargs)
+# @MODEL_REGISTRY.register()
+# class vit_base_patch16_224(nn.Module):
+#     def __init__(self, cfg, **kwargs):
+#         super(vit_base_patch16_224, self).__init__()
+#         self.pretrained = True
+#         patch_size = 16
+#         self.model = VisionTransformer(img_size=cfg.DATA.TRAIN_CROP_SIZE, num_classes=cfg.MODEL.NUM_CLASSES, patch_size=patch_size, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4, qkv_bias=True, norm_layer=partial(
+#             nn.LayerNorm, eps=1e-6), drop_rate=0., attn_drop_rate=0., drop_path_rate=0.1, num_frames=cfg.DATA.NUM_FRAMES, attention_type=cfg.TIMESFORMER.ATTENTION_TYPE, **kwargs)
 
-        self.attention_type = cfg.TIMESFORMER.ATTENTION_TYPE
-        self.model.default_cfg = default_cfgs['vit_base_patch16_224']
-        self.num_patches = (cfg.DATA.TRAIN_CROP_SIZE // patch_size) * \
-            (cfg.DATA.TRAIN_CROP_SIZE // patch_size)
-        pretrained_model = cfg.TIMESFORMER.PRETRAINED_MODEL
-        if self.pretrained:
-            load_pretrained(self.model, num_classes=self.model.num_classes, in_chans=kwargs.get('in_chans', 3), filter_fn=_conv_filter,
-                            img_size=cfg.DATA.TRAIN_CROP_SIZE, num_patches=self.num_patches, attention_type=self.attention_type, pretrained_model=pretrained_model)
+#         self.attention_type = cfg.TIMESFORMER.ATTENTION_TYPE
+#         self.model.default_cfg = default_cfgs['vit_base_patch16_224']
+#         self.num_patches = (cfg.DATA.TRAIN_CROP_SIZE // patch_size) * \
+#             (cfg.DATA.TRAIN_CROP_SIZE // patch_size)
+#         pretrained_model = cfg.TIMESFORMER.PRETRAINED_MODEL
+#         if self.pretrained:
+#             load_pretrained(self.model, num_classes=self.model.num_classes, in_chans=kwargs.get('in_chans', 3), filter_fn=_conv_filter,
+#                             img_size=cfg.DATA.TRAIN_CROP_SIZE, num_patches=self.num_patches, attention_type=self.attention_type, pretrained_model=pretrained_model)
 
-    def forward(self, x):
-        x = self.model(x)
-        return x
+#     def forward(self, x):
+#         x = self.model(x)
+#         return x
 
 
 @MODEL_REGISTRY.register()
 class TimeSformer(nn.Module):
-    def __init__(self, img_size=224, patch_size=16, num_classes=400, num_frames=8, attention_type='divided_space_time', pretrained_model='', **kwargs):
+    def __init__(self, img_size=224, patch_size=16, num_classes=400, num_frames=8,
+                 attention_type='divided_space_time', causal_attention=False, pretrained=False,
+                 pretrained_model='', **kwargs):
         super(TimeSformer, self).__init__()
-        self.pretrained = True
-        self.model = VisionTransformer(img_size=img_size, num_classes=num_classes, patch_size=patch_size, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4, qkv_bias=True, norm_layer=partial(
-            nn.LayerNorm, eps=1e-6), drop_rate=0., attn_drop_rate=0., drop_path_rate=0.1, num_frames=num_frames, attention_type=attention_type, **kwargs)
+        self.pretrained = pretrained
+        self.model = VisionTransformer(img_size=img_size, num_classes=num_classes,
+        patch_size=patch_size, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4, qkv_bias=True,
+        norm_layer=partial(nn.LayerNorm, eps=1e-6), drop_rate=0., attn_drop_rate=0.,
+            drop_path_rate=0.1, num_frames=num_frames, attention_type=attention_type,
+            causal_attention=causal_attention, **kwargs)
 
         self.attention_type = attention_type
 
