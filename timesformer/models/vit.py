@@ -140,7 +140,7 @@ class Block(nn.Module):
             x = x + self.drop_path(self.attn(self.norm1(x)))
             x = x + self.drop_path(self.mlp(self.norm2(x)))
             return x
-        
+
         elif self.attention_type == 'divided_space_time':
             # Temporal
             # BVH MOD: Apply causal_attention (see Attention module).
@@ -278,7 +278,7 @@ class VisionTransformer(nn.Module):
 
     def forward_features(self, x):
         # BVH NOTE: This is irrelevant and replaced by vision_tf.py DenseTimeSformer forward().
-        
+
         B = x.shape[0]
         x, T, W = self.patch_embed(x)
         cls_tokens = self.cls_token.expand(x.size(0), -1, -1)
@@ -377,14 +377,36 @@ def _conv_filter(state_dict, patch_size=16):
 class TimeSformer(nn.Module):
     def __init__(self, img_size=224, patch_size=16, num_classes=400, num_frames=8,
                  attention_type='divided_space_time', causal_attention=False, drop_path_rate=0.1,
-                 pretrained=False, pretrained_model='', **kwargs):
+                 network_depth=12, pretrained=False, pretrained_model='', **kwargs):
         super(TimeSformer, self).__init__()
         self.pretrained = pretrained
-        self.model = VisionTransformer(img_size=img_size, num_classes=num_classes,
-        patch_size=patch_size, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4, qkv_bias=True,
-        norm_layer=partial(nn.LayerNorm, eps=1e-6), drop_rate=0., attn_drop_rate=0.,
-            drop_path_rate=drop_path_rate, num_frames=num_frames, attention_type=attention_type,
-            causal_attention=causal_attention, **kwargs)
+
+        if network_depth == 12:
+            self.model = VisionTransformer(
+                img_size=img_size, num_classes=num_classes,
+                patch_size=patch_size, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4,
+                qkv_bias=True, norm_layer=partial(nn.LayerNorm, eps=1e-6), drop_rate=0.,
+                attn_drop_rate=0., drop_path_rate=drop_path_rate, num_frames=num_frames,
+                attention_type=attention_type, causal_attention=causal_attention, **kwargs)
+
+        elif network_depth == 18:
+            self.model = VisionTransformer(
+                img_size=img_size, num_classes=num_classes,
+                patch_size=patch_size, embed_dim=896, depth=18, num_heads=14, mlp_ratio=4,
+                qkv_bias=True, norm_layer=partial(nn.LayerNorm, eps=1e-6), drop_rate=0.,
+                attn_drop_rate=0., drop_path_rate=drop_path_rate, num_frames=num_frames,
+                attention_type=attention_type, causal_attention=causal_attention, **kwargs)
+
+        elif network_depth == 24:
+            self.model = VisionTransformer(
+                img_size=img_size, num_classes=num_classes,
+                patch_size=patch_size, embed_dim=1024, depth=24, num_heads=16, mlp_ratio=4,
+                qkv_bias=True, norm_layer=partial(nn.LayerNorm, eps=1e-6), drop_rate=0.,
+                attn_drop_rate=0., drop_path_rate=drop_path_rate, num_frames=num_frames,
+                attention_type=attention_type, causal_attention=causal_attention, **kwargs)
+
+        else:
+            raise ValueError(f'Invalid network depth {network_depth}, must be one of 12, 18, 24.')
 
         self.attention_type = attention_type
 
