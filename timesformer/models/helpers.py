@@ -107,13 +107,12 @@ def load_pretrained(model, cfg=None, num_classes=1000, in_chans=3, filter_fn=Non
         return
 
     if len(pretrained_model) == 0:
-       state_dict = model_zoo.load_url(cfg['url'], progress=False, map_location='cpu')
+        state_dict = model_zoo.load_url(cfg['url'], progress=False, map_location='cpu')
     else:
-       try:
-         state_dict = load_state_dict(pretrained_model)['model']
-       except:
-         state_dict = load_state_dict(pretrained_model)
-
+        # BVH MOD to avoid exceptions:
+        state_dict = load_state_dict(pretrained_model)
+        if 'model' in state_dict:
+            state_dict = state_dict['model']
 
     if filter_fn is not None:
         state_dict = filter_fn(state_dict)
