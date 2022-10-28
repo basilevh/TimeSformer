@@ -93,7 +93,7 @@ class Attention(nn.Module):
         if self.causal_attention:
             causal_mask = torch.ones(attn.shape, dtype=torch.bool, device=attn.device).tril()
             # attn[~causal_mask] = -1e9
-            attn[~causal_mask] = -torch.inf
+            attn[~causal_mask] = -1e10
 
         attn = attn.softmax(dim=-1)
         attn = self.attn_drop(attn)
