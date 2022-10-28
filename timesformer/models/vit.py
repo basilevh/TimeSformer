@@ -92,10 +92,14 @@ class Attention(nn.Module):
         # NOTE: We must do this before softmax to ensure probabilities keep summing to one.
         if self.causal_attention:
             causal_mask = torch.ones(attn.shape, dtype=torch.bool, device=attn.device).tril()
-            # attn[~causal_mask] = -1e9
             attn[~causal_mask] = -1e10
 
         attn = attn.softmax(dim=-1)
+        
+        # Uncommenting this causes crash:
+        # if self.causal_attention:
+        #     attn[~causal_mask] = 0.0
+        
         attn = self.attn_drop(attn)
 
         x2 = (attn @ v).transpose(1, 2).reshape(B, N, C)
