@@ -92,16 +92,27 @@ class Attention(nn.Module):
         # NOTE: We must do this before softmax to ensure probabilities keep summing to one.
         if self.causal_attention:
             causal_mask = torch.ones(attn.shape, dtype=torch.bool, device=attn.device).tril()
-            attn[~causal_mask] = -1e9
+            # attn[~causal_mask] = -1e9
+            attn[~causal_mask] = -torch.inf
 
         attn = attn.softmax(dim=-1)
         attn = self.attn_drop(attn)
 
-        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+        x2 = (attn @ v).transpose(1, 2).reshape(B, N, C)
         if self.with_qkv:
-            x = self.proj(x)
-            x = self.proj_drop(x)
-        return x
+            x2 = self.proj(x2)
+            x2 = self.proj_drop(x2)
+
+        # shape(x) = shape(x2) = (300, 30, 768) = (h*w, T, D).
+        '''
+BVH NOTES: To check if online operation is correct, place breakpoint and run:
+x.retain_grad(), x2.retain_grad()
+torch.autograd.backward(x2[0, 10, 100], retain_graph=True)
+print(x2.grad[0, :, 100])  # should be one-hot
+print(x.grad[0, :, 100])  # should be a bunch of non-zero values + all-zero values.
+        '''
+        
+        return x2
 
 
 class Block(nn.Module):
@@ -115,13 +126,15 @@ class Block(nn.Module):
 
         self.norm1 = norm_layer(dim)
         self.attn = Attention(
-            dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)  # NOTE: causal_attention must definitely remain False here.
+            dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop,
+            proj_drop=drop)  # NOTE: causal_attention must definitely remain False here.
 
         # Temporal Attention Parameters
         if self.attention_type == 'divided_space_time':
             self.temporal_norm1 = norm_layer(dim)
             self.temporal_attn = Attention(
-                dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop, causal_attention=self.causal_attention)
+                dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop,
+                proj_drop=drop, causal_attention=self.causal_attention)
             self.temporal_fc = nn.Linear(dim, dim)
 
         # drop path
@@ -166,7 +179,14 @@ class Block(nn.Module):
             # Taking care of CLS token
             cls_token = res_spatial[:, 0, :]
             cls_token = rearrange(cls_token, '(b t) m -> b t m', b=B, t=T)
-            cls_token = torch.mean(cls_token, 1, True)  # averaging for every frame
+
+            if self.causal_attention:
+                cls_token = cls_token[:, -1:, :]  # Just copy the one from the last frame.
+            else:
+                # BVH MOD: Very important former bug! This step indirectly used to cause temporal
+                # non-causal information leakage happening over >= 2 subsequent attention blocks:
+                cls_token = torch.mean(cls_token, 1, True)  # averaging for every frame
+
             res_spatial = res_spatial[:, 1:, :]
             res_spatial = rearrange(res_spatial, '(b t) (h w) m -> b (h w t) m', b=B, h=H, w=W, t=T)
             res = res_spatial
