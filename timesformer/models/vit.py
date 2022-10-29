@@ -62,7 +62,7 @@ class Mlp(nn.Module):
 
 
 class Attention(nn.Module):
-    def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0., with_qkv=True, causal_attention=False):
+    def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0., with_qkv=True, causal_attention=0):
         super().__init__()
         self.num_heads = num_heads
         head_dim = dim // num_heads
@@ -184,8 +184,10 @@ class Block(nn.Module):
             cls_token = res_spatial[:, 0, :]
             cls_token = rearrange(cls_token, '(b t) m -> b t m', b=B, t=T)
 
-            if self.causal_attention:
+            if self.causal_attention == 1:
                 cls_token = cls_token[:, -1:, :]  # Just copy the one from the last frame.
+            elif self.causal_attention == 2:
+                cls_token = cls_token[:, 0:1, :]  # Just copy the one from the first frame.
             else:
                 # BVH MOD: Very important former bug! This step indirectly used to cause temporal
                 # non-causal information leakage happening over >= 2 subsequent attention blocks:
@@ -232,7 +234,7 @@ class VisionTransformer(nn.Module):
 
     def __init__(self, img_size=224, patch_size=16, in_chans=3, num_classes=1000, embed_dim=768, depth=12,
                  num_heads=12, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop_rate=0., attn_drop_rate=0.,
-                 drop_path_rate=0.1, hybrid_backbone=None, norm_layer=nn.LayerNorm, num_frames=8, attention_type='divided_space_time', causal_attention=False, dropout=0.):
+                 drop_path_rate=0.1, hybrid_backbone=None, norm_layer=nn.LayerNorm, num_frames=8, attention_type='divided_space_time', causal_attention=0, dropout=0.):
         super().__init__()
         self.attention_type = attention_type
         self.causal_attention = causal_attention  # BVH MOD
@@ -400,7 +402,7 @@ def _conv_filter(state_dict, patch_size=16):
 @MODEL_REGISTRY.register()
 class TimeSformer(nn.Module):
     def __init__(self, img_size=224, patch_size=16, num_classes=400, num_frames=8,
-                 attention_type='divided_space_time', causal_attention=False, drop_path_rate=0.1,
+                 attention_type='divided_space_time', causal_attention=0, drop_path_rate=0.1,
                  network_depth=12, pretrained=False, pretrained_model='', **kwargs):
         super(TimeSformer, self).__init__()
         self.pretrained = pretrained
