@@ -90,14 +90,18 @@ class Attention(nn.Module):
         # BVH MOD: Apply temporal causal attention mask by setting lower triangle values to zero.
         # attn = (B, H, T, T) where H is multihead, first T is query time, second T is key time.
         # NOTE: We must do this before softmax to ensure probabilities keep summing to one.
-        if self.causal_attention:
-            causal_mask = torch.ones(attn.shape, dtype=torch.bool, device=attn.device).tril()
+        if self.causal_attention > 0:
+            causal_mask = torch.ones(attn.shape, dtype=torch.bool, device=attn.device)
+            if self.causal_attention <= 2:
+                causal_mask = causal_mask.tril()
+            else:
+                causal_mask = causal_mask.tril(diagonal=self.causal_attention - 2)
             attn[~causal_mask] = -1e10
 
         attn = attn.softmax(dim=-1)
         
         # Uncommenting this causes crash:
-        # if self.causal_attention:
+        # if self.causal_attention > 0:
         #     attn[~causal_mask] = 0.0
         
         attn = self.attn_drop(attn)
@@ -153,7 +157,7 @@ class Block(nn.Module):
         H = num_spatial_tokens // W
 
         if self.attention_type in ['space_only', 'joint_space_time']:
-            assert not(self.causal_attention)
+            assert self.causal_attention == 0
             x = x + self.drop_path(self.attn(self.norm1(x)))
             x = x + self.drop_path(self.mlp(self.norm2(x)))
             return x
@@ -172,28 +176,38 @@ class Block(nn.Module):
             xt = x[:, 1:, :] + res_temporal
 
             # Spatial
-            init_cls_token = x[:, 0, :].unsqueeze(1)
-            cls_token = init_cls_token.repeat(1, T, 1)
-            cls_token = rearrange(cls_token, 'b t m -> (b t) m', b=B, t=T).unsqueeze(1)
-            xs = xt
-            xs = rearrange(xs, 'b (h w t) m -> (b t) (h w) m', b=B, h=H, w=W, t=T)
-            xs = torch.cat((cls_token, xs), 1)
-            res_spatial = self.drop_path(self.attn(self.norm1(xs)))
+            if self.causal_attention in [0, 1]:
+                init_cls_token = x[:, 0, :].unsqueeze(1)
+                cls_token = init_cls_token.repeat(1, T, 1)
+                cls_token = rearrange(cls_token, 'b t m -> (b t) m', b=B, t=T).unsqueeze(1)
+                xs = xt
+                xs = rearrange(xs, 'b (h w t) m -> (b t) (h w) m', b=B, h=H, w=W, t=T)
+                xs = torch.cat((cls_token, xs), 1)
+                res_spatial = self.drop_path(self.attn(self.norm1(xs)))
 
-            # Taking care of CLS token
-            cls_token = res_spatial[:, 0, :]
-            cls_token = rearrange(cls_token, '(b t) m -> b t m', b=B, t=T)
+                # Taking care of CLS token
+                cls_token = res_spatial[:, 0, :]
+                cls_token = rearrange(cls_token, '(b t) m -> b t m', b=B, t=T)
+                
+                if self.causal_attention == 0:
+                    # BVH MOD: Very important former bug! This step indirectly used to cause temporal
+                    # non-causal information leakage happening over >= 2 subsequent attention blocks:
+                    cls_token = torch.mean(cls_token, 1, True)  # averaging for every frame
+                
+                else:
+                    # NOTE: I suspect this may be causing a big performance drop somehow.
+                    cls_token = cls_token[:, -1:, :]  # Just copy the one from the last frame.
+            
+                res_spatial = res_spatial[:, 1:, :]
+            
+            elif self.causal_attention >= 2 or self.causal_attention == -1:
+                # New: Avoid cls_token altogether.
+                init_cls_token = x[:, 0, :].unsqueeze(1)  # (B, 1, D).
+                cls_token = torch.zeros_like(init_cls_token)  # (B, 1, D).
+                xs = xt
+                xs = rearrange(xs, 'b (h w t) m -> (b t) (h w) m', b=B, h=H, w=W, t=T)
+                res_spatial = self.drop_path(self.attn(self.norm1(xs)))
 
-            if self.causal_attention == 1:
-                cls_token = cls_token[:, -1:, :]  # Just copy the one from the last frame.
-            elif self.causal_attention == 2:
-                cls_token = cls_token[:, 0:1, :]  # Just copy the one from the first frame.
-            else:
-                # BVH MOD: Very important former bug! This step indirectly used to cause temporal
-                # non-causal information leakage happening over >= 2 subsequent attention blocks:
-                cls_token = torch.mean(cls_token, 1, True)  # averaging for every frame
-
-            res_spatial = res_spatial[:, 1:, :]
             res_spatial = rearrange(res_spatial, '(b t) (h w) m -> b (h w t) m', b=B, h=H, w=W, t=T)
             res = res_spatial
             x = xt
