@@ -195,8 +195,7 @@ class Block(nn.Module):
                     cls_token = torch.mean(cls_token, 1, True)  # averaging for every frame
                 
                 else:
-                    # NOTE: I suspect this may be causing a big performance drop somehow.
-                    cls_token = cls_token[:, -1:, :]  # Just copy the one from the last frame.
+                    cls_token = cls_token[:, 0:1, :]  # Just copy the one from the first frame.
             
                 res_spatial = res_spatial[:, 1:, :]
             
